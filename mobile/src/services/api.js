@@ -1,17 +1,25 @@
 // Single API layer for AfyaConnect.
 //
-// Every function returns the SAME shape as the real FastAPI backend
-// (see backend/main.py), so flipping USE_MOCK to false is the only change
-// needed once the backend team ships. Until then, mocks keep the whole app
-// demoable end-to-end.
+// Every function returns the SAME shape whether USE_MOCK is on or off, so
+// screens never know which mode they're in. The real backend
+// (backend/main.py) is async/Postgres, built by a teammate and verified
+// end-to-end against a real database (39/39 checks) before this file was
+// wired to it. Two backend quirks this layer papers over:
 //
-// DO NOT flip USE_MOCK to false until the backend team has:
-//   - fixed the broken security.py imports
-//   - made /patients/register actually write to the DB
-//   - added a password field + preferred_language to the Patient model
-//   - built the auth + appointment + audit endpoints
-//   - added Kiswahili triage keywords
-//   - locked down CORS
+//   1. /auth/login and /auth/register return only tokens, no patient - this
+//      layer makes a follow-up /auth/me call so callers still get back
+//      {access_token, refresh_token, token_type, patient} as one object.
+//   2. Registration is two steps server-side (POST /auth/register for
+//      phone+password, then POST /patients/register to save the
+//      accessibility profile). register() only does step 1; the profile
+//      save happens from AccessibilitySetupScreen via api.completeProfile().
+//
+// SAFETY: every /triage/report call MUST pass an explicit `language`. The
+// backend falls back to the patient's stored preferred_language when
+// `language` is omitted - so a Kiswahili-preferring patient reporting
+// symptoms in English (e.g. every preset, which always sends English
+// clinical text) would silently be triaged against the WRONG keyword list.
+// Confirmed by testing: this turns a "critical" chest-pain report into "low".
 
 import Constants from 'expo-constants';
 
@@ -158,7 +166,14 @@ export const api = {
         patient: mockMe(phone),
       };
     }
-    return realRequest('/auth/login', { method: 'POST', body: { phone, password } });
+    // Backend field is phone_primary, and the response carries only tokens -
+    // fetch the patient in a follow-up call so callers get one combined object.
+    const tokens = await realRequest('/auth/login', {
+      method: 'POST',
+      body: { phone_primary: phone, password },
+    });
+    const patient = await realRequest('/auth/me', { token: tokens.access_token });
+    return { ...tokens, patient };
   },
 
   async register({ name, phone, password, preferred_language }) {
@@ -178,12 +193,21 @@ export const api = {
         },
       };
     }
-    // NOTE: backend endpoint is /patients/register today; a real /auth/register
-    // that also writes the patient + password is pending on the backend team.
-    return realRequest('/auth/register', {
+    // Step 1 of 2 server-side: phone + password only. AccessibilitySetupScreen
+    // calls api.completeProfile() next (step 2) to save the chosen profile.
+    const [first_name, ...rest] = (name || '').trim().split(' ');
+    const tokens = await realRequest('/auth/register', {
       method: 'POST',
-      body: { name, phone, password, preferred_language },
+      body: {
+        first_name: first_name || 'Friend',
+        last_name: rest.join(' ') || '-',
+        phone_primary: phone,
+        password,
+        preferred_language: preferred_language || 'en',
+      },
     });
+    const patient = await realRequest('/auth/me', { token: tokens.access_token });
+    return { ...tokens, patient };
   },
 
   async me({ token }) {
@@ -194,15 +218,30 @@ export const api = {
     return realRequest('/auth/me', { token });
   },
 
+  // Step 2 of registration (and later profile edits): save the accessibility
+  // profile / medical / caregiver / address fields. Partial - only send what
+  // changed. Called from AccessibilitySetupScreen right after register(), and
+  // from ProfileScreen's edit-save.
+  async completeProfile(fields) {
+    if (USE_MOCK) {
+      await wait(400);
+      return { success: true, _mock: true };
+    }
+    return realRequest('/patients/register', { method: 'POST', body: fields });
+  },
+
   // ---- TRIAGE ----
-  async reportSymptoms({ patient_id, symptoms_text, pain_level, duration_hours }) {
+  // `language` is REQUIRED in real mode - see the safety note at the top of
+  // this file. Callers: SymptomReportScreen passes 'en' for presets (always
+  // English clinical text) and the current app language for free text.
+  async reportSymptoms({ patient_id, symptoms_text, pain_level, duration_hours, language }) {
     if (USE_MOCK) {
       await wait(700);
       return mockTriage(symptoms_text);
     }
     return realRequest('/triage/report', {
       method: 'POST',
-      body: { patient_id, symptoms_text, pain_level, duration_hours },
+      body: { patient_id, symptoms_text, pain_level, duration_hours, language },
     });
   },
 
@@ -290,32 +329,29 @@ export const api = {
     return realRequest(`/queue/teleconsult/accept/${ticket_id}`, { method: 'POST' });
   },
 
-  // ---- APPOINTMENTS (backend endpoint PENDING — mocked, flagged) ----
+  // ---- APPOINTMENTS ----
   async appointments({ patient_id }) {
     if (USE_MOCK) {
       await wait(400);
       return { appointments: MOCK_APPOINTMENTS, _mock: true };
     }
-    // TODO(backend): GET /appointments does not exist yet.
+    // patient_id isn't sent - the backend derives it from the auth token.
     return realRequest('/appointments');
   },
 
-  // ---- CAREGIVER AUDIT LOG (backend endpoint PENDING — stubbed, flagged) ----
-  async logCaregiverAction({ caregiver_id, patient_id, action, meta }) {
-    const entry = {
-      caregiver_id,
-      patient_id,
-      action,
-      meta: meta || {},
-      timestamp: new Date().toISOString(),
-    };
+  // ---- CAREGIVER AUDIT LOG ----
+  // NARROW on purpose: the real backend only accepts the two session-transition
+  // actions below (enter/exit caregiver mode). Every other caregiver action
+  // (schedule an appointment, etc.) is audited server-side automatically, next
+  // to the actual data mutation - do NOT call this for those; the backend
+  // will reject an unrecognized `action` with 422.
+  async logCaregiverAction({ patient_id, action, meta }) {
+    const entry = { patient_id, action, meta: meta || {}, timestamp: new Date().toISOString() };
     if (USE_MOCK) {
-      // TODO(backend): POST /audit/log (AuditLog) does not exist yet.
-      // Kept as a local record so the flow is honest and testable.
       console.log('[AUDIT:MOCK]', entry);
       return { logged: true, _mock: true, entry };
     }
-    return realRequest('/audit/log', { method: 'POST', body: entry });
+    return realRequest('/audit/log', { method: 'POST', body: { patient_id, action, meta } });
   },
 
   // ---- VOICE ----

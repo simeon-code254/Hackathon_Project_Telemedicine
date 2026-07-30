@@ -1,9 +1,9 @@
 """
-Quadriplegic Telemedicine Platform - FastAPI Backend
+AfyaConnect Telemedicine Platform - FastAPI Backend
 Accessibility-first API with voice support and assistive technology integration
 """
 
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, File, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -12,27 +12,37 @@ from datetime import datetime, timedelta
 import uvicorn
 import os
 from enum import Enum
-from sqlalchemy.orm import Session
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 # Import services
 from backend.app.services.triage_service import analyze_patient_symptoms
 from backend.app.services.queue_service import add_patient_to_queue, virtual_queue
+from backend.app.services.notification_service import send_notification
+from backend.app.services.audit_service import write_audit_log, require_caregiver_permission
 
-# Persistence + auth
-from backend.app.db import get_db, init_db
+from backend.app.db.session import get_db
 from backend.app.models.database import (
-    Patient, Appointment, AuditLog,
+    Patient, Appointment, TriageRecord, Doctor,
     DisabilityType as DBDisabilityType,
     AssistiveTech as DBAssistiveTech,
-    AppointmentStatus,
+    PriorityLevel as DBPriorityLevel,
 )
 from backend.app.core.security import (
-    get_password_hash, verify_password, create_access_token, get_current_patient,
+    get_password_hash,
+    authenticate_patient,
+    create_token_pair,
+    create_access_token,
+    decode_token,
+    get_current_patient,
 )
+from backend.app.core.config import settings
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Quadriplegic Telemedicine API",
+    title="AfyaConnect Telemedicine API",
     description="""
     Accessibility-first telemedicine platform for quadriplegic patients.
 
@@ -60,12 +70,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
-
-# Create tables on startup (idempotent). Uses SQLite by default; set DATABASE_URL
-# for Postgres. See backend/app/db.py.
-@app.on_event("startup")
-def _startup():
-    init_db()
 
 security = HTTPBearer()
 
@@ -95,30 +99,39 @@ class PriorityLevel(str, Enum):
 
 # ============= PYDANTIC MODELS =============
 
-class PatientRegistration(BaseModel):
-    """Patient registration with accessibility profile."""
-    first_name: str = Field(..., min_length=1, max_length=100)
-    last_name: str = Field(..., min_length=1, max_length=100)
-    phone_primary: str = Field(..., min_length=10)
+class PatientProfileUpdate(BaseModel):
+    """
+    Accessibility profile completion, filled in by an already-authenticated
+    patient after /auth/register. Does not touch identity/credentials
+    (phone_primary, password) - those are set once at registration and
+    changed via dedicated endpoints, not here.
+    """
     phone_emergency: Optional[str] = None
+    preferred_language: Optional[str] = Field(None, pattern="^(en|sw)$")
 
     # Disability info
-    disability_type: DisabilityType = DisabilityType.QUADRIPLEGIA
+    disability_type: Optional[DisabilityType] = None
     disability_description: Optional[str] = None
 
     # Assistive technology
-    primary_assistive_tech: AssistiveTech = AssistiveTech.VOICE
+    primary_assistive_tech: Optional[AssistiveTech] = None
     secondary_assistive_tech: Optional[AssistiveTech] = None
 
     # Communication
-    preferred_communication: str = "voice"  # voice, text, video, caregiver
+    preferred_communication: Optional[str] = None  # voice, text, video, caregiver
     communication_notes: Optional[str] = None
 
     # Caregiver
-    has_caregiver: bool = False
+    has_caregiver: Optional[bool] = None
     caregiver_name: Optional[str] = None
     caregiver_phone: Optional[str] = None
-    caregiver_can_schedule: bool = False
+    caregiver_can_schedule: Optional[bool] = None
+    caregiver_can_consent: Optional[bool] = None
+
+    # Medical (editable from ProfileScreen's "Medical" section)
+    chronic_conditions: Optional[List[str]] = None
+    medications: Optional[List[str]] = None
+    allergies: Optional[List[str]] = None
 
     # Address
     address_line1: Optional[str] = None
@@ -127,6 +140,31 @@ class PatientRegistration(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
 
+
+class AuthRegisterRequest(BaseModel):
+    """Minimal account creation - phone + password only."""
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    phone_primary: str = Field(..., min_length=10)
+    password: str = Field(..., min_length=8)
+    preferred_language: str = Field("en", pattern="^(en|sw)$")
+
+
+class AuthLoginRequest(BaseModel):
+    phone_primary: str = Field(..., min_length=10)
+    password: str
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: Optional[str] = None
+    token_type: str = "bearer"
+    expires_in: int
+
 class SymptomReport(BaseModel):
     """Symptom report via text or voice."""
     patient_id: str
@@ -134,9 +172,14 @@ class SymptomReport(BaseModel):
     voice_recording_url: Optional[str] = None
     pain_level: Optional[int] = Field(None, ge=0, le=10)
     duration_hours: Optional[int] = None
+    language: Optional[str] = Field(
+        None, pattern="^(en|sw)$",
+        description="Overrides the patient's saved preferred_language for this report if set."
+    )
 
 class TriageResponse(BaseModel):
     """AI Triage result."""
+    triage_id: Optional[str] = None  # TriageRecord.uuid - needed by POST /appointments
     priority: str
     confidence: float
     recommended_action: str
@@ -170,6 +213,9 @@ class AppointmentRequest(BaseModel):
     appointment_type: str  # teleconsult, hospital, home_visit
     preferred_date: Optional[datetime] = None
     special_needs: Optional[List[str]] = []
+    acting_as_caregiver: bool = Field(
+        False, description="Set true when a caregiver is booking on the patient's behalf."
+    )
 
 class VoiceCommand(BaseModel):
     """Voice command processing."""
@@ -183,7 +229,7 @@ class VoiceCommand(BaseModel):
 def root():
     """API root with system status."""
     return {
-        "service": "Quadriplegic Telemedicine Platform",
+        "service": "AfyaConnect Telemedicine Platform",
         "version": "1.0.0",
         "status": "operational",
         "accessibility_features": [
@@ -195,7 +241,9 @@ def root():
             "high_contrast_mode"
         ],
         "endpoints": {
-            "patient_registration": "/patients/register",
+            "auth_register": "/auth/register",
+            "auth_login": "/auth/login",
+            "patient_profile": "/patients/register",
             "symptom_report": "/triage/report",
             "queue_join": "/queue/join",
             "queue_status": "/queue/status/{ticket_id}",
@@ -203,70 +251,173 @@ def root():
         }
     }
 
-# --- Enum mapping between the API's tokens and the DB enum values ---
-_TECH_APP_TO_DB = {
-    "none": DBAssistiveTech.NONE,
-    "eye_tracking": DBAssistiveTech.EYE_TRACKING,
-    "head_mouse": DBAssistiveTech.HEAD_MOUSE,
-    "sip_puff": DBAssistiveTech.SIP_PUFF,
-    "switch": DBAssistiveTech.SWITCH,
-    "voice": DBAssistiveTech.VOICE,
-    "caregiver_proxy": DBAssistiveTech.CAREGIVER_PROXY,
-}
-_DISABILITY_APP_TO_DB = {
-    "quadriplegia": DBDisabilityType.QUADRIPLEGIA,
-    "paraplegia": DBDisabilityType.PARAPLEGIA,
-    "als": DBDisabilityType.ALS,
-    "ms": DBDisabilityType.MS,
-    "other": DBDisabilityType.OTHER,
-}
+def _app_tech(db_tech: Optional[DBAssistiveTech]) -> AssistiveTech:
+    """
+    Convert the DB's AssistiveTech (values like "sip_and_puff", "switch_access",
+    "voice_control") to the API/mobile enum (values like "sip_puff", "switch",
+    "voice") by matching the shared member NAME, not the value.
 
-
-def _apply_registration(db: Session, patient: "PatientRegistration", password: Optional[str] = None) -> Patient:
-    """Create + persist a Patient row from a registration payload."""
-    row = Patient(
-        first_name=patient.first_name,
-        last_name=patient.last_name,
-        phone_primary=patient.phone_primary,
-        phone_emergency=patient.phone_emergency,
-        disability_type=_DISABILITY_APP_TO_DB.get(
-            getattr(patient.disability_type, "value", patient.disability_type), DBDisabilityType.QUADRIPLEGIA),
-        disability_description=patient.disability_description,
-        primary_assistive_tech=_TECH_APP_TO_DB.get(
-            getattr(patient.primary_assistive_tech, "value", patient.primary_assistive_tech), DBAssistiveTech.VOICE),
-        has_caregiver=patient.has_caregiver,
-        caregiver_name=patient.caregiver_name,
-        caregiver_phone=patient.caregiver_phone,
-        caregiver_can_schedule=patient.caregiver_can_schedule,
-        address_line1=patient.address_line1,
-        city=patient.city,
-        region=patient.region,
-        latitude=patient.latitude,
-        longitude=patient.longitude,
-    )
-    if password:
-        row.password_hash = get_password_hash(password)
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
+    The two enums intentionally have different value strings (DB values are
+    more descriptive for admin/SQL readability; API values match the mobile
+    app's i18n keys, e.g. access.switch / access.sip_puff / access.voice), so
+    converting by .value directly silently produces a value neither enum
+    recognizes for exactly the switch/sip_puff/voice profiles - the three
+    this app exists to serve.
+    """
+    if db_tech is None or db_tech.name not in AssistiveTech.__members__:
+        return AssistiveTech.NONE
+    return AssistiveTech[db_tech.name]
 
 
 @app.post("/patients/register")
-def register_patient(patient: PatientRegistration, db: Session = Depends(get_db)):
+async def complete_patient_profile(
+    profile: PatientProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_patient: Patient = Depends(get_current_patient),
+):
     """
-    Register new patient with accessibility profile.
-    Now actually persists the patient to the database.
+    Fill in / update the accessibility profile for the authenticated patient.
+
+    This is step 2 of signup: call POST /auth/register first to create the
+    phone+password account and get a token, then call this (with that
+    token) to save disability info, assistive tech, caregiver details, etc.
+    Only fields present in the request body are changed - omit a field to
+    leave it as-is.
     """
-    row = _apply_registration(db, patient)
+    updates = profile.model_dump(exclude_unset=True)
+
+    if "disability_type" in updates:
+        updates["disability_type"] = DBDisabilityType[profile.disability_type.name]
+    if "primary_assistive_tech" in updates:
+        updates["primary_assistive_tech"] = DBAssistiveTech[profile.primary_assistive_tech.name]
+    if "secondary_assistive_tech" in updates:
+        updates["secondary_assistive_tech"] = (
+            DBAssistiveTech[profile.secondary_assistive_tech.name]
+            if profile.secondary_assistive_tech else None
+        )
+
+    for field, value in updates.items():
+        setattr(current_patient, field, value)
+
+    await db.commit()
+    await db.refresh(current_patient)
+
+    await write_audit_log(
+        db, user_id=current_patient.uuid, user_type="patient",
+        action="update", resource_type="patient", resource_id=current_patient.uuid,
+        details={"updated_fields": list(updates.keys())},
+    )
+    await db.commit()
+
+    primary_tech = _app_tech(current_patient.primary_assistive_tech)
+
     return {
         "success": True,
-        "patient_id": row.uuid,
-        "message": f"Welcome {row.first_name}. Your accessibility profile has been saved.",
+        "patient_id": current_patient.uuid,
+        "message": f"Thanks {current_patient.first_name}, your accessibility profile has been saved.",
         "accessibility_settings": {
-            "primary_tech": patient.primary_assistive_tech,
-            "ui_recommendations": _get_ui_recommendations(patient.primary_assistive_tech)
-        }
+            "primary_tech": primary_tech,
+            "ui_recommendations": _get_ui_recommendations(primary_tech)
+        },
+    }
+
+
+# ============= AUTH ENDPOINTS =============
+
+@app.post("/auth/register", response_model=TokenResponse)
+async def auth_register(payload: AuthRegisterRequest, db: AsyncSession = Depends(get_db)):
+    """Minimal account creation (phone + password), no accessibility profile."""
+    existing = await db.execute(
+        select(Patient).where(Patient.phone_primary == payload.phone_primary)
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="An account with this phone number already exists.")
+
+    db_patient = Patient(
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+        phone_primary=payload.phone_primary,
+        password_hash=get_password_hash(payload.password),
+        preferred_language=payload.preferred_language,
+    )
+    db.add(db_patient)
+    await db.commit()
+    await db.refresh(db_patient)
+
+    await write_audit_log(
+        db, user_id=db_patient.uuid, user_type="patient",
+        action="create", resource_type="patient", resource_id=db_patient.uuid,
+    )
+    await db.commit()
+
+    return create_token_pair(db_patient)
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+async def auth_login(payload: AuthLoginRequest, db: AsyncSession = Depends(get_db)):
+    """Log in with phone + password."""
+    patient = await authenticate_patient(db, payload.phone_primary, payload.password)
+    if patient is None:
+        raise HTTPException(status_code=401, detail="Incorrect phone number or password")
+    if not patient.is_active:
+        raise HTTPException(status_code=403, detail="Account disabled")
+
+    patient.last_login = datetime.utcnow()
+    await db.commit()
+
+    return create_token_pair(patient)
+
+
+@app.post("/auth/refresh", response_model=TokenResponse)
+async def auth_refresh(payload: RefreshTokenRequest, db: AsyncSession = Depends(get_db)):
+    """Exchange a valid refresh token for a new access token."""
+    decoded = decode_token(payload.refresh_token)
+    if decoded is None or decoded.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    patient_uuid = decoded.get("sub")
+    result = await db.execute(select(Patient).where(Patient.uuid == patient_uuid))
+    patient = result.scalar_one_or_none()
+    if patient is None or not patient.is_active:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    access_token = create_access_token({"sub": patient.uuid})
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=payload.refresh_token,  # not rotating refresh tokens for MVP
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+
+
+@app.get("/auth/me")
+async def auth_me(current_patient: Patient = Depends(get_current_patient)):
+    """
+    Return the authenticated patient's full profile + UI recommendations.
+    Called by the mobile app on every launch to restore accessibility state,
+    and by ProfileScreen to render personal/medical/caregiver/address info.
+    """
+    primary_tech = _app_tech(current_patient.primary_assistive_tech)
+    return {
+        "patient_id": current_patient.uuid,
+        "first_name": current_patient.first_name,
+        "last_name": current_patient.last_name,
+        "phone_primary": current_patient.phone_primary,
+        "phone_emergency": current_patient.phone_emergency,
+        "preferred_language": current_patient.preferred_language,
+        "disability_type": current_patient.disability_type.value if current_patient.disability_type else None,
+        "primary_assistive_tech": primary_tech.value,
+        "has_caregiver": current_patient.has_caregiver,
+        "caregiver_name": current_patient.caregiver_name,
+        "caregiver_phone": current_patient.caregiver_phone,
+        "caregiver_can_schedule": current_patient.caregiver_can_schedule,
+        "caregiver_can_consent": current_patient.caregiver_can_consent,
+        "conditions": current_patient.chronic_conditions or [],
+        "medications": current_patient.medications or [],
+        "allergies": current_patient.allergies or [],
+        "address_line1": current_patient.address_line1,
+        "city": current_patient.city,
+        "region": current_patient.region,
+        "ui_recommendations": _get_ui_recommendations(primary_tech),
     }
 
 def _get_ui_recommendations(tech: AssistiveTech) -> Dict:
@@ -306,68 +457,118 @@ def _get_ui_recommendations(tech: AssistiveTech) -> Dict:
     }
     return recommendations.get(tech, {})
 
-# ============= AUTH =============
+@app.post("/triage/report", response_model=TriageResponse)
+async def report_symptoms(report: SymptomReport, db: AsyncSession = Depends(get_db)):
+    """
+    Submit symptom report for AI triage.
+    Supports text or voice input (voice transcribed automatically), and
+    English or Kiswahili symptom text.
+    """
+    result_patient = await db.execute(select(Patient).where(Patient.uuid == report.patient_id))
+    patient = result_patient.scalar_one_or_none()
+    if patient is None:
+        raise HTTPException(status_code=404, detail="Patient not found")
 
-class AuthRegister(BaseModel):
-    name: str = Field(..., min_length=1)
-    phone: str = Field(..., min_length=9)
-    password: str = Field(..., min_length=4)
-    preferred_language: str = "en"
+    try:
+        result = analyze_patient_symptoms(
+            symptoms=report.symptoms_text,
+            disability_type=patient.disability_type.value if patient.disability_type else "quadriplegia",
+            is_pwd=True,
+            language=report.language,
+            preferred_language=patient.preferred_language,
+        )
 
+        triage_record = TriageRecord(
+            patient_id=patient.id,
+            symptoms_description=report.symptoms_text,
+            symptoms_voice_url=report.voice_recording_url,
+            priority_level=DBPriorityLevel(result["priority"]),
+            priority_confidence=result["confidence"],
+            recommended_action=result["recommended_action"],
+            estimated_urgency_minutes=result["urgency_minutes"],
+            ai_reasoning=result["reasoning"],
+            matched_symptoms=result["matched_symptoms"],
+            potential_conditions=result["potential_conditions"],
+        )
+        db.add(triage_record)
+        await db.commit()
+        await db.refresh(triage_record)
 
-class AuthLogin(BaseModel):
-    phone: str
-    password: str
+        if result["priority"] == "critical":
+            await send_notification(
+                db, patient, notification_type="sms", template_key="triage_critical",
+                related_to="triage", related_id=triage_record.uuid,
+            )
 
+        return TriageResponse(triage_id=triage_record.uuid, **result)
 
-@app.post("/auth/register")
-def auth_register(body: AuthRegister, db: Session = Depends(get_db)):
-    """Register a patient with a password and issue an access token."""
-    existing = db.query(Patient).filter(Patient.phone_primary == body.phone).first()
-    if existing:
-        raise HTTPException(status_code=409, detail="Phone number already registered")
-    parts = body.name.strip().split()
-    first = parts[0] if parts else "Friend"
-    last = " ".join(parts[1:]) if len(parts) > 1 else ""
-    row = Patient(
-        first_name=first,
-        last_name=last,
-        phone_primary=body.phone,
-        preferred_language=(body.preferred_language or "en"),
-        password_hash=get_password_hash(body.password),
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Triage analysis failed: {str(e)}")
+
+@app.post("/appointments")
+async def create_appointment(
+    request: AppointmentRequest,
+    db: AsyncSession = Depends(get_db),
+    current_patient: Patient = Depends(get_current_patient),
+):
+    """
+    Schedule an appointment following triage.
+
+    If `acting_as_caregiver` is set, the caregiver must be authorized via
+    the patient's `caregiver_can_schedule` flag - every caregiver-proxy
+    booking is written to the audit log regardless of outcome.
+    """
+    if request.patient_id != current_patient.uuid:
+        raise HTTPException(status_code=403, detail="Cannot schedule an appointment for another patient's account")
+
+    triage_result = await db.execute(
+        select(TriageRecord).where(TriageRecord.uuid == request.triage_id)
     )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
+    triage_record = triage_result.scalar_one_or_none()
+    if triage_record is None:
+        raise HTTPException(status_code=404, detail="Triage record not found")
+
+    user_type = "patient"
+    if request.acting_as_caregiver:
+        require_caregiver_permission(current_patient, action="schedule")
+        user_type = "caregiver"
+
+    appointment = Appointment(
+        patient_id=current_patient.id,
+        triage_record_id=triage_record.id,
+        appointment_type=request.appointment_type,
+        scheduled_time=request.preferred_date or (datetime.utcnow() + timedelta(hours=1)),
+        accessibility_needs=request.special_needs or [],
+    )
+    db.add(appointment)
+    await db.flush()
+
+    await write_audit_log(
+        db,
+        user_id=current_patient.uuid,
+        user_type=user_type,
+        action="create",
+        resource_type="appointment",
+        resource_id=appointment.uuid,
+        details={"acting_as_caregiver": request.acting_as_caregiver, "appointment_type": request.appointment_type},
+    )
+    await db.commit()
+    await db.refresh(appointment)
+
+    await send_notification(
+        db, current_patient, notification_type="sms", template_key="appointment_confirmed",
+        context={"appointment_type": appointment.appointment_type, "scheduled_time": appointment.scheduled_time.isoformat()},
+        related_to="appointment", related_id=appointment.uuid,
+    )
+
     return {
-        "access_token": create_access_token(row.uuid),
-        "token_type": "bearer",
-        "patient": row.to_api_dict(),
+        "success": True,
+        "appointment_id": appointment.uuid,
+        "appointment_type": appointment.appointment_type,
+        "scheduled_time": appointment.scheduled_time.isoformat(),
+        "status": appointment.status.value,
     }
 
-
-@app.post("/auth/login")
-def auth_login(body: AuthLogin, db: Session = Depends(get_db)):
-    """Authenticate by phone + password and issue an access token."""
-    row = db.query(Patient).filter(Patient.phone_primary == body.phone).first()
-    if not row or not verify_password(body.password, row.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid phone number or password")
-    row.last_login = datetime.utcnow()
-    db.commit()
-    return {
-        "access_token": create_access_token(row.uuid),
-        "token_type": "bearer",
-        "patient": row.to_api_dict(),
-    }
-
-
-@app.get("/auth/me")
-def auth_me(current: Patient = Depends(get_current_patient)):
-    """Return the authenticated patient's profile."""
-    return current.to_api_dict()
-
-
-# ============= APPOINTMENTS =============
 
 _PROVIDER_DEFAULT = {
     "teleconsult": "AfyaConnect teleconsult",
@@ -376,113 +577,84 @@ _PROVIDER_DEFAULT = {
 }
 
 
-def _appt_to_api(a: Appointment) -> Dict:
-    """Serialize to the shape the mobile AppointmentsScreen expects."""
-    if a.doctor is not None:
-        provider = f"Dr. {a.doctor.first_name} {a.doctor.last_name}"
-    else:
-        provider = a.notes or _PROVIDER_DEFAULT.get(a.appointment_type, "Care team")
-    return {
-        "id": a.uuid,
-        "type": a.appointment_type,
-        "provider": provider,
-        "starts_at": a.scheduled_time.isoformat() if a.scheduled_time else None,
-        "joinable": a.appointment_type == "teleconsult",
-    }
-
-
-class AppointmentCreate(BaseModel):
-    appointment_type: str = "teleconsult"  # teleconsult, hospital, home_visit
-    scheduled_time: Optional[datetime] = None
-    provider: Optional[str] = None
-
-
 @app.get("/appointments")
-def list_appointments(current: Patient = Depends(get_current_patient), db: Session = Depends(get_db)):
-    """List the authenticated patient's upcoming appointments."""
-    rows = (
-        db.query(Appointment)
-        .filter(Appointment.patient_id == current.id)
-        .order_by(Appointment.scheduled_time.asc())
-        .all()
-    )
-    return {"appointments": [_appt_to_api(a) for a in rows]}
-
-
-@app.post("/appointments")
-def create_appointment(
-    body: AppointmentCreate,
-    current: Patient = Depends(get_current_patient),
-    db: Session = Depends(get_db),
+async def list_appointments(
+    db: AsyncSession = Depends(get_db),
+    current_patient: Patient = Depends(get_current_patient),
 ):
-    """Book an appointment for the authenticated patient."""
-    when = body.scheduled_time or (datetime.utcnow() + timedelta(hours=2))
-    a = Appointment(
-        patient_id=current.id,
-        appointment_type=body.appointment_type,
-        scheduled_time=when,
-        status=AppointmentStatus.SCHEDULED,
-        notes=body.provider,
+    """
+    List the authenticated patient's upcoming appointments.
+
+    The mobile AppointmentsScreen needs this to show real bookings; the rest
+    of this backend only exposed POST /appointments (create) before this.
+    """
+    result = await db.execute(
+        select(Appointment)
+        .options(selectinload(Appointment.doctor))
+        .where(Appointment.patient_id == current_patient.id)
+        .order_by(Appointment.scheduled_time.asc())
     )
-    db.add(a)
-    db.commit()
-    db.refresh(a)
-    return _appt_to_api(a)
+    rows = result.scalars().all()
 
+    appointments = []
+    for a in rows:
+        if a.doctor is not None:
+            provider = f"Dr. {a.doctor.first_name} {a.doctor.last_name}"
+        else:
+            provider = a.notes or _PROVIDER_DEFAULT.get(a.appointment_type, "Care team")
+        appointments.append({
+            "id": a.uuid,
+            "type": a.appointment_type,
+            "provider": provider,
+            "starts_at": a.scheduled_time.isoformat() if a.scheduled_time else None,
+            "joinable": a.appointment_type == "teleconsult",
+        })
 
-# ============= AUDIT LOG (caregiver actions) =============
+    return {"appointments": appointments}
+
 
 class AuditLogIn(BaseModel):
-    caregiver_id: Optional[str] = None
+    """
+    Client-reportable audit events. Deliberately narrow: only session-level
+    transitions the client itself observes (entering/exiting caregiver proxy
+    mode) - NOT a generic write-anything-you-want log. Every audit-worthy
+    data mutation (create appointment, update profile, ...) is logged
+    server-side, next to the mutation itself, via write_audit_log().
+    """
+    action: str = Field(..., pattern="^(enter_caregiver_mode|exit_caregiver_mode)$")
     patient_id: Optional[str] = None
-    action: str
-    meta: Optional[Dict] = {}
+    meta: Optional[Dict] = None
 
 
 @app.post("/audit/log")
-def write_audit_log(body: AuditLogIn, db: Session = Depends(get_db)):
-    """Persist a caregiver action to the audit log."""
-    entry = AuditLog(
-        user_id=body.caregiver_id,
+async def log_client_audit_event(
+    body: AuditLogIn,
+    db: AsyncSession = Depends(get_db),
+    current_patient: Patient = Depends(get_current_patient),
+):
+    """Record a caregiver-mode session transition against the caller's own account."""
+    entry = await write_audit_log(
+        db,
+        user_id=current_patient.uuid,
         user_type="caregiver",
         action=body.action,
         resource_type="patient",
-        resource_id=body.patient_id,
+        resource_id=body.patient_id or current_patient.uuid,
         details=body.meta or {},
     )
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
+    await db.commit()
+    await db.refresh(entry)
     return {
         "logged": True,
         "entry": {
-            "caregiver_id": body.caregiver_id,
-            "patient_id": body.patient_id,
+            "caregiver_id": current_patient.uuid,
+            "patient_id": body.patient_id or current_patient.uuid,
             "action": body.action,
             "meta": body.meta or {},
             "timestamp": entry.timestamp.isoformat() if entry.timestamp else None,
         },
     }
 
-
-@app.post("/triage/report", response_model=TriageResponse)
-def report_symptoms(report: SymptomReport):
-    """
-    Submit symptom report for AI triage.
-    Supports text or voice input (voice transcribed automatically).
-    """
-    try:
-        # Analyze symptoms
-        result = analyze_patient_symptoms(
-            symptoms=report.symptoms_text,
-            disability_type="quadriplegia",  # Would lookup from patient record
-            is_pwd=True
-        )
-
-        return TriageResponse(**result)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Triage analysis failed: {str(e)}")
 
 @app.post("/queue/join")
 def join_queue(request: QueueTicketRequest):
@@ -643,13 +815,13 @@ def process_voice_recordings():
 if __name__ == "__main__":
     print("""
     ╔════════════════════════════════════════════════════════════════╗
-    ║  Quadriplegic Telemedicine Platform - Starting                 ║
+    ║  AfyaConnect Telemedicine Platform - Starting                 ║
     ║  Accessibility: Voice-first | Eye-tracking | Switch-access     ║
     ╚════════════════════════════════════════════════════════════════╝
     """)
 
     uvicorn.run(
-        "main:app",
+        "backend.main:app",
         host="0.0.0.0",
         port=8000,
         reload=True,

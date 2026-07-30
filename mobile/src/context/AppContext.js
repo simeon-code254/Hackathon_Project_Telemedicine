@@ -146,7 +146,6 @@ export function AppProvider({ children }) {
     async (patient) => {
       setCaregiver({ patient });
       await api.logCaregiverAction({
-        caregiver_id: user?.patient_id || 'unknown',
         patient_id: patient?.patient_id,
         action: 'enter_caregiver_mode',
       });
@@ -157,7 +156,6 @@ export function AppProvider({ children }) {
   const exitCaregiverMode = useCallback(async () => {
     if (caregiver) {
       await api.logCaregiverAction({
-        caregiver_id: user?.patient_id || 'unknown',
         patient_id: caregiver.patient?.patient_id,
         action: 'exit_caregiver_mode',
       });

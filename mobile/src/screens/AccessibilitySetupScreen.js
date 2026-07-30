@@ -6,6 +6,7 @@ import SpokenScreen from '../components/SpokenScreen';
 import ScreenHeader from '../components/ScreenHeader';
 import ScanGroup from '../components/ScanGroup';
 import { announce } from '../utils/a11y';
+import { api } from '../services/api';
 
 // SCREEN 3 — Accessibility setup (the chicken-and-egg screen).
 // It auto-scans and speaks the options so it is operable BEFORE we know the
@@ -14,11 +15,21 @@ const PROFILES = ['voice', 'switch', 'sip_puff', 'eye_tracking', 'head_mouse', '
 
 export default function AccessibilitySetupScreen({ navigation }) {
   const { t } = useTranslation();
-  const { setAssistiveTech } = useContext(AppContext);
+  const { setAssistiveTech, updateUser } = useContext(AppContext);
   const { speak } = useSpeech();
 
   const choose = async (tech) => {
     await setAssistiveTech(tech);
+    await updateUser({ primary_assistive_tech: tech });
+    // Step 2 of registration (or a later re-tune from Settings): persist the
+    // profile choice server-side so it survives login on another device.
+    // Best-effort - local state above is already updated either way, so a
+    // flaky network here doesn't block the user from continuing.
+    try {
+      await api.completeProfile({ primary_assistive_tech: tech });
+    } catch (e) {
+      // swallow - local profile is still correct for this session
+    }
     announce(t('access.saved'));
     speak(t('access.saved'));
     navigation.reset({ index: 0, routes: [{ name: 'Home' }] });

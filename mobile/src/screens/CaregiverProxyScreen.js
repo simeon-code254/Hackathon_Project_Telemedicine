@@ -43,17 +43,17 @@ export default function CaregiverProxyScreen({ navigation }) {
     navigation.navigate('Home');
   };
 
+  // Permission gate only - does NOT call /audit/log. The backend's audit
+  // endpoint accepts only the enter/exit session-transition actions (see
+  // AppContext.enterCaregiverMode/exitCaregiverMode); a real mutation this
+  // gate leads to (e.g. actually booking an appointment) gets its own audit
+  // entry server-side, written next to that mutation.
   const doGatedAction = async (action, allowed, deniedKey) => {
     if (!allowed) {
       const msg = t(deniedKey);
       setFlash(msg); announce(msg); speak(msg);
       return;
     }
-    await api.logCaregiverAction({
-      caregiver_id: user?.patient_id,
-      patient_id: patient?.patient_id,
-      action,
-    });
     const msg = t('caregiver.actionLogged');
     setFlash(msg); announce(msg); speak(msg);
     if (action === 'schedule_appointment') navigation.navigate('Symptom');

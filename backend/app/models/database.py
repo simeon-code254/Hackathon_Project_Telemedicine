@@ -15,6 +15,18 @@ import uuid
 
 Base = declarative_base()
 
+
+def _pg_enum(py_enum):
+    """
+    Bind a Python Enum to its Postgres native enum type by VALUE, not member
+    name. SQLAlchemy's Enum() sends the member name ("QUADRIPLEGIA") on
+    INSERT by default; the Alembic migration created the Postgres enum types
+    using the lowercase values ("quadriplegia", ...), so without this every
+    insert of one of these columns fails with "invalid input value for enum".
+    """
+    return Enum(py_enum, values_callable=lambda enum_cls: [e.value for e in enum_cls])
+
+
 # Enums
 class PriorityLevel(PyEnum):
     LOW = "low"
@@ -71,27 +83,30 @@ class Patient(Base):
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
     email = Column(String(255), unique=True, nullable=True)
-    phone_primary = Column(String(20), nullable=False, index=True)
+    # phone_primary doubles as the login identifier (see auth/login), so it
+    # must be unique. Expected format is E.164 (e.g. "+254712345678").
+    phone_primary = Column(String(20), unique=True, nullable=False, index=True)
     phone_emergency = Column(String(20), nullable=True)
 
     # Authentication
-    password_hash = Column(String(255), nullable=True)  # set on register
+    password_hash = Column(String(255), nullable=False)
 
-    # Language preference (drives app language + TTS locale: "en" | "sw")
-    preferred_language = Column(String(5), default="en")
+    # Localization - drives which language SMS/notification templates and
+    # Kiswahili-aware triage keyword matching use for this patient.
+    preferred_language = Column(String(10), default="en", nullable=False)
 
     # Disability Information (Critical for accessibility)
-    disability_type = Column(Enum(DisabilityType), default=DisabilityType.QUADRIPLEGIA)
+    disability_type = Column(_pg_enum(DisabilityType), default=DisabilityType.QUADRIPLEGIA)
     disability_description = Column(Text, nullable=True)  # Additional details
     disability_onset_date = Column(DateTime, nullable=True)
 
     # Assistive Technology Profile
-    primary_assistive_tech = Column(Enum(AssistiveTech), default=AssistiveTech.VOICE)
-    secondary_assistive_tech = Column(Enum(AssistiveTech), nullable=True)
+    primary_assistive_tech = Column(_pg_enum(AssistiveTech), default=AssistiveTech.VOICE)
+    secondary_assistive_tech = Column(_pg_enum(AssistiveTech), nullable=True)
     assistive_tech_details = Column(JSON, default={})  # Device-specific settings
 
     # Communication Preferences
-    preferred_communication = Column(Enum(CommunicationMode), default=CommunicationMode.VOICE)
+    preferred_communication = Column(_pg_enum(CommunicationMode), default=CommunicationMode.VOICE)
     communication_notes = Column(Text, nullable=True)  # Speech patterns, breathing support needs
 
     # Accessibility Settings
@@ -155,47 +170,6 @@ class Patient(Base):
             "assistive_tech": self.primary_assistive_tech.value,
             "caregiver": self.caregiver_name if self.has_caregiver else None,
             "communication": self.preferred_communication.value
-        }
-
-    # DB AssistiveTech enum values differ from the tokens the mobile app uses
-    # (e.g. "switch_access" here vs "switch" in the app). Map so the app's
-    # i18n keys (access.<token>) resolve.
-    _TECH_TO_APP = {
-        "none": "none",
-        "eye_tracking": "eye_tracking",
-        "head_mouse": "head_mouse",
-        "sip_and_puff": "sip_puff",
-        "switch_access": "switch",
-        "voice_control": "voice",
-        "caregiver_proxy": "caregiver_proxy",
-    }
-
-    def to_api_dict(self):
-        """Serialize to the exact shape the mobile app expects (see
-        mobile/src/services/api.js mockMe()). Keeps USE_MOCK=false a drop-in."""
-        def _enum(v):
-            return v.value if hasattr(v, "value") else v
-        tech = _enum(self.primary_assistive_tech)
-        return {
-            "patient_id": self.uuid,
-            "first_name": self.first_name,
-            "last_name": self.last_name or "",
-            "phone_primary": self.phone_primary,
-            "phone_emergency": self.phone_emergency,
-            "disability_type": _enum(self.disability_type),
-            "primary_assistive_tech": self._TECH_TO_APP.get(tech, tech),
-            "preferred_language": self.preferred_language or "en",
-            "has_caregiver": bool(self.has_caregiver),
-            "caregiver_name": self.caregiver_name,
-            "caregiver_phone": self.caregiver_phone,
-            "caregiver_can_schedule": bool(self.caregiver_can_schedule),
-            "caregiver_can_consent": bool(self.caregiver_can_consent),
-            "conditions": self.chronic_conditions or [],
-            "medications": self.medications or [],
-            "allergies": self.allergies or [],
-            "address_line1": self.address_line1,
-            "city": self.city,
-            "region": self.region,
         }
 
 # ================= DOCTOR MODEL =================
@@ -279,7 +253,7 @@ class TriageRecord(Base):
     symptoms_transcribed = Column(Text, nullable=True)  # Whisper transcription
 
     # AI Analysis
-    priority_level = Column(Enum(PriorityLevel), nullable=False)
+    priority_level = Column(_pg_enum(PriorityLevel), nullable=False)
     priority_confidence = Column(Float, nullable=False)  # 0.0 - 1.0
 
     # Triage Decision
@@ -295,7 +269,7 @@ class TriageRecord(Base):
     nurse_reviewed = Column(Boolean, default=False)
     nurse_override = Column(Boolean, default=False)
     nurse_notes = Column(Text, nullable=True)
-    final_priority = Column(Enum(PriorityLevel), nullable=True)  # After nurse review
+    final_priority = Column(_pg_enum(PriorityLevel), nullable=True)  # After nurse review
 
     # Outcome tracking
     actual_outcome = Column(String(50), nullable=True)  # What actually happened
@@ -331,7 +305,7 @@ class QueueTicket(Base):
     queue_type = Column(String(50), default="hospital")  # "hospital", "teleconsult", "home_visit"
 
     # Priority (Two-layer system)
-    clinical_priority = Column(Enum(PriorityLevel), nullable=False)
+    clinical_priority = Column(_pg_enum(PriorityLevel), nullable=False)
     accessibility_priority = Column(Integer, default=0)  # 0=none, 1=PWD standard, 2=urgent PWD
     composite_score = Column(Float, nullable=False)  # Lower = higher priority
 
@@ -391,7 +365,7 @@ class Appointment(Base):
     duration_minutes = Column(Integer, default=30)
 
     # Status
-    status = Column(Enum(AppointmentStatus), default=AppointmentStatus.SCHEDULED)
+    status = Column(_pg_enum(AppointmentStatus), default=AppointmentStatus.SCHEDULED)
 
     # Location (for hospital or home visit)
     location_address = Column(String(500), nullable=True)

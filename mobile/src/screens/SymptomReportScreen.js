@@ -31,7 +31,7 @@ const PRESETS = [
 
 export default function SymptomReportScreen({ navigation }) {
   const { t } = useTranslation();
-  const { theme, user, caregiver } = useContext(AppContext);
+  const { theme, user, caregiver, lang } = useContext(AppContext);
   const { speak, sttAvailable } = useSpeech();
 
   const [selectedKey, setSelectedKey] = useState(null);
@@ -76,19 +76,28 @@ export default function SymptomReportScreen({ navigation }) {
     speak(t('symptom.selected', { symptom: label }));
   };
 
-  const buildSymptomText = () => {
-    if (describe.trim().length >= 10) return describe.trim();
+  // Returns { text, language }. The two paths carry different languages, and
+  // the backend needs to be told which explicitly: it otherwise falls back to
+  // the patient's SAVED preferred_language, which can silently mis-triage a
+  // critical report if that doesn't match the text actually sent (e.g. every
+  // preset always sends English clinical text, regardless of app language).
+  const buildSymptomReport = () => {
+    if (describe.trim().length >= 10) {
+      // Free text: the patient typed in whatever language the app UI is
+      // currently showing them.
+      return { text: describe.trim(), language: lang };
+    }
     if (selectedKey) {
       const preset = PRESETS.find((p) => p.key === selectedKey);
-      // Send the clinical English keyword string to triage (matches backend
-      // keyword sets); the localized label is only for display.
-      return `Patient reports ${preset.text}.`;
+      // Presets always send the clinical English keyword string (matches
+      // backend keyword sets); the localized label is only for display.
+      return { text: `Patient reports ${preset.text}.`, language: 'en' };
     }
-    return '';
+    return { text: '', language: 'en' };
   };
 
   const submit = async () => {
-    const symptoms_text = buildSymptomText();
+    const { text: symptoms_text, language } = buildSymptomReport();
     if (!symptoms_text) {
       setError(t('symptom.chooseOne'));
       announce(t('symptom.chooseOne'));
@@ -100,6 +109,7 @@ export default function SymptomReportScreen({ navigation }) {
       const result = await api.reportSymptoms({
         patient_id: caregiver?.patient?.patient_id || user?.patient_id,
         symptoms_text,
+        language,
       });
       navigation.navigate('TriageResult', { triage: result });
     } catch (e) {

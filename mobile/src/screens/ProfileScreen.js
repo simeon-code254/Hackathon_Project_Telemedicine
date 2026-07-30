@@ -1,5 +1,5 @@
 import React, { useContext, useState } from 'react';
-import { View, Text } from 'react-native';
+import { View, Text, ActivityIndicator } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import { AppContext } from '../context/AppContext';
 import { useSpeech } from '../hooks/useSpeech';
@@ -8,6 +8,7 @@ import ScreenHeader from '../components/ScreenHeader';
 import FieldInput from '../components/FieldInput';
 import BigButton from '../components/BigButton';
 import { announce } from '../utils/a11y';
+import { api } from '../services/api';
 
 // SCREEN 12 — Profile. Read-only VIEW first; editing is behind an explicit
 // action (so a mis-scan/mis-tap can't silently change medical data). Covers
@@ -46,6 +47,8 @@ export default function ProfileScreen() {
 
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
   const notSet = t('profile.notSet');
 
   const startEdit = () => {
@@ -67,22 +70,49 @@ export default function ProfileScreen() {
   };
 
   const save = async () => {
-    await updateUser({
-      first_name: form.first_name,
-      last_name: form.last_name,
-      phone_primary: form.phone_primary,
-      phone_emergency: form.phone_emergency,
-      conditions: toList(form.conditions),
-      medications: toList(form.medications),
-      allergies: toList(form.allergies),
-      caregiver_name: form.caregiver_name,
-      caregiver_phone: form.caregiver_phone,
-      address_line1: form.address_line1,
-      city: form.city,
-      region: form.region,
-    });
-    setEditing(false);
-    announce(t('profile.saved')); speak(t('profile.saved'));
+    setBusy(true);
+    setError(null);
+    const conditions = toList(form.conditions);
+    const medications = toList(form.medications);
+    const allergies = toList(form.allergies);
+    try {
+      // Backend field is chronic_conditions (mobile/UI calls it "conditions");
+      // first/last name and phone_primary are identity fields set once at
+      // registration and not editable via this endpoint - update them locally
+      // only (matches the backend's two-step signup design).
+      await api.completeProfile({
+        phone_emergency: form.phone_emergency,
+        chronic_conditions: conditions,
+        medications,
+        allergies,
+        caregiver_name: form.caregiver_name,
+        caregiver_phone: form.caregiver_phone,
+        address_line1: form.address_line1,
+        city: form.city,
+        region: form.region,
+      });
+      await updateUser({
+        first_name: form.first_name,
+        last_name: form.last_name,
+        phone_primary: form.phone_primary,
+        phone_emergency: form.phone_emergency,
+        conditions,
+        medications,
+        allergies,
+        caregiver_name: form.caregiver_name,
+        caregiver_phone: form.caregiver_phone,
+        address_line1: form.address_line1,
+        city: form.city,
+        region: form.region,
+      });
+      setEditing(false);
+      announce(t('profile.saved')); speak(t('profile.saved'));
+    } catch (e) {
+      setError(t('common.error'));
+      announce(t('common.error'));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const set = (k) => (v) => setForm((p) => ({ ...p, [k]: v }));
@@ -110,9 +140,19 @@ export default function ProfileScreen() {
           <FieldInput label={t('profile.city')} value={form.city} onChangeText={set('city')} />
           <FieldInput label={t('profile.region')} value={form.region} onChangeText={set('region')} />
         </Section>
-        <BigButton label={t('profile.saveChanges')} variant="primary" onPress={save} />
+        {error ? (
+          <Text accessibilityLiveRegion="assertive" accessibilityRole="alert" allowFontScaling
+            style={{ color: theme.priority.critical, fontSize: theme.font.label, marginBottom: theme.spacing.sm }}>
+            {error}
+          </Text>
+        ) : null}
+        {busy ? (
+          <ActivityIndicator size="large" color={theme.colors.primary} accessibilityLabel={t('common.loading')} />
+        ) : (
+          <BigButton label={t('profile.saveChanges')} variant="primary" onPress={save} />
+        )}
         <View style={{ height: theme.spacing.sm }} />
-        <BigButton label={t('common.cancel')} variant="surface" onPress={() => setEditing(false)} />
+        <BigButton label={t('common.cancel')} variant="surface" onPress={() => { setEditing(false); setError(null); }} disabled={busy} />
       </SpokenScreen>
     );
   }
