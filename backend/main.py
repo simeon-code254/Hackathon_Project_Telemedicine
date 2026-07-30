@@ -15,6 +15,7 @@ from enum import Enum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 # Import services
 from backend.app.services.triage_service import analyze_patient_symptoms
@@ -24,7 +25,7 @@ from backend.app.services.audit_service import write_audit_log, require_caregive
 
 from backend.app.db.session import get_db
 from backend.app.models.database import (
-    Patient, Appointment, TriageRecord,
+    Patient, Appointment, TriageRecord, Doctor,
     DisabilityType as DBDisabilityType,
     AssistiveTech as DBAssistiveTech,
     PriorityLevel as DBPriorityLevel,
@@ -57,13 +58,17 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS - Allow all origins for development (restrict in production)
+# CORS - restricted to an explicit allowlist. Override in production via the
+# ALLOWED_ORIGINS env var (comma-separated). Native mobile requests (Expo Go)
+# send no Origin header and are unaffected; this guards the web build + docs.
+_default_origins = "http://localhost:8081,http://localhost:19006,http://127.0.0.1:8081"
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Restrict to known domains
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 security = HTTPBearer()
@@ -123,6 +128,11 @@ class PatientProfileUpdate(BaseModel):
     caregiver_can_schedule: Optional[bool] = None
     caregiver_can_consent: Optional[bool] = None
 
+    # Medical (editable from ProfileScreen's "Medical" section)
+    chronic_conditions: Optional[List[str]] = None
+    medications: Optional[List[str]] = None
+    allergies: Optional[List[str]] = None
+
     # Address
     address_line1: Optional[str] = None
     city: Optional[str] = None
@@ -169,6 +179,7 @@ class SymptomReport(BaseModel):
 
 class TriageResponse(BaseModel):
     """AI Triage result."""
+    triage_id: Optional[str] = None  # TriageRecord.uuid - needed by POST /appointments
     priority: str
     confidence: float
     recommended_action: str
@@ -240,6 +251,24 @@ def root():
         }
     }
 
+def _app_tech(db_tech: Optional[DBAssistiveTech]) -> AssistiveTech:
+    """
+    Convert the DB's AssistiveTech (values like "sip_and_puff", "switch_access",
+    "voice_control") to the API/mobile enum (values like "sip_puff", "switch",
+    "voice") by matching the shared member NAME, not the value.
+
+    The two enums intentionally have different value strings (DB values are
+    more descriptive for admin/SQL readability; API values match the mobile
+    app's i18n keys, e.g. access.switch / access.sip_puff / access.voice), so
+    converting by .value directly silently produces a value neither enum
+    recognizes for exactly the switch/sip_puff/voice profiles - the three
+    this app exists to serve.
+    """
+    if db_tech is None or db_tech.name not in AssistiveTech.__members__:
+        return AssistiveTech.NONE
+    return AssistiveTech[db_tech.name]
+
+
 @app.post("/patients/register")
 async def complete_patient_profile(
     profile: PatientProfileUpdate,
@@ -280,12 +309,7 @@ async def complete_patient_profile(
     )
     await db.commit()
 
-    primary_tech = (
-        AssistiveTech(current_patient.primary_assistive_tech.value)
-        if current_patient.primary_assistive_tech
-        and current_patient.primary_assistive_tech.value in AssistiveTech._value2member_map_
-        else AssistiveTech.NONE
-    )
+    primary_tech = _app_tech(current_patient.primary_assistive_tech)
 
     return {
         "success": True,
@@ -368,26 +392,32 @@ async def auth_refresh(payload: RefreshTokenRequest, db: AsyncSession = Depends(
 @app.get("/auth/me")
 async def auth_me(current_patient: Patient = Depends(get_current_patient)):
     """
-    Return the authenticated patient's profile + UI recommendations.
-    Called by the mobile app on every launch to restore accessibility state.
+    Return the authenticated patient's full profile + UI recommendations.
+    Called by the mobile app on every launch to restore accessibility state,
+    and by ProfileScreen to render personal/medical/caregiver/address info.
     """
+    primary_tech = _app_tech(current_patient.primary_assistive_tech)
     return {
         "patient_id": current_patient.uuid,
         "first_name": current_patient.first_name,
         "last_name": current_patient.last_name,
         "phone_primary": current_patient.phone_primary,
+        "phone_emergency": current_patient.phone_emergency,
         "preferred_language": current_patient.preferred_language,
         "disability_type": current_patient.disability_type.value if current_patient.disability_type else None,
-        "primary_assistive_tech": current_patient.primary_assistive_tech.value if current_patient.primary_assistive_tech else None,
+        "primary_assistive_tech": primary_tech.value,
         "has_caregiver": current_patient.has_caregiver,
+        "caregiver_name": current_patient.caregiver_name,
+        "caregiver_phone": current_patient.caregiver_phone,
         "caregiver_can_schedule": current_patient.caregiver_can_schedule,
         "caregiver_can_consent": current_patient.caregiver_can_consent,
-        "ui_recommendations": _get_ui_recommendations(
-            AssistiveTech(current_patient.primary_assistive_tech.value)
-            if current_patient.primary_assistive_tech
-            and current_patient.primary_assistive_tech.value in AssistiveTech._value2member_map_
-            else AssistiveTech.NONE
-        ),
+        "conditions": current_patient.chronic_conditions or [],
+        "medications": current_patient.medications or [],
+        "allergies": current_patient.allergies or [],
+        "address_line1": current_patient.address_line1,
+        "city": current_patient.city,
+        "region": current_patient.region,
+        "ui_recommendations": _get_ui_recommendations(primary_tech),
     }
 
 def _get_ui_recommendations(tech: AssistiveTech) -> Dict:
@@ -462,6 +492,7 @@ async def report_symptoms(report: SymptomReport, db: AsyncSession = Depends(get_
         )
         db.add(triage_record)
         await db.commit()
+        await db.refresh(triage_record)
 
         if result["priority"] == "critical":
             await send_notification(
@@ -469,7 +500,7 @@ async def report_symptoms(report: SymptomReport, db: AsyncSession = Depends(get_
                 related_to="triage", related_id=triage_record.uuid,
             )
 
-        return TriageResponse(**result)
+        return TriageResponse(triage_id=triage_record.uuid, **result)
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Triage analysis failed: {str(e)}")
@@ -536,6 +567,92 @@ async def create_appointment(
         "appointment_type": appointment.appointment_type,
         "scheduled_time": appointment.scheduled_time.isoformat(),
         "status": appointment.status.value,
+    }
+
+
+_PROVIDER_DEFAULT = {
+    "teleconsult": "AfyaConnect teleconsult",
+    "hospital": "Hospital visit",
+    "home_visit": "Home visit nurse",
+}
+
+
+@app.get("/appointments")
+async def list_appointments(
+    db: AsyncSession = Depends(get_db),
+    current_patient: Patient = Depends(get_current_patient),
+):
+    """
+    List the authenticated patient's upcoming appointments.
+
+    The mobile AppointmentsScreen needs this to show real bookings; the rest
+    of this backend only exposed POST /appointments (create) before this.
+    """
+    result = await db.execute(
+        select(Appointment)
+        .options(selectinload(Appointment.doctor))
+        .where(Appointment.patient_id == current_patient.id)
+        .order_by(Appointment.scheduled_time.asc())
+    )
+    rows = result.scalars().all()
+
+    appointments = []
+    for a in rows:
+        if a.doctor is not None:
+            provider = f"Dr. {a.doctor.first_name} {a.doctor.last_name}"
+        else:
+            provider = a.notes or _PROVIDER_DEFAULT.get(a.appointment_type, "Care team")
+        appointments.append({
+            "id": a.uuid,
+            "type": a.appointment_type,
+            "provider": provider,
+            "starts_at": a.scheduled_time.isoformat() if a.scheduled_time else None,
+            "joinable": a.appointment_type == "teleconsult",
+        })
+
+    return {"appointments": appointments}
+
+
+class AuditLogIn(BaseModel):
+    """
+    Client-reportable audit events. Deliberately narrow: only session-level
+    transitions the client itself observes (entering/exiting caregiver proxy
+    mode) - NOT a generic write-anything-you-want log. Every audit-worthy
+    data mutation (create appointment, update profile, ...) is logged
+    server-side, next to the mutation itself, via write_audit_log().
+    """
+    action: str = Field(..., pattern="^(enter_caregiver_mode|exit_caregiver_mode)$")
+    patient_id: Optional[str] = None
+    meta: Optional[Dict] = None
+
+
+@app.post("/audit/log")
+async def log_client_audit_event(
+    body: AuditLogIn,
+    db: AsyncSession = Depends(get_db),
+    current_patient: Patient = Depends(get_current_patient),
+):
+    """Record a caregiver-mode session transition against the caller's own account."""
+    entry = await write_audit_log(
+        db,
+        user_id=current_patient.uuid,
+        user_type="caregiver",
+        action=body.action,
+        resource_type="patient",
+        resource_id=body.patient_id or current_patient.uuid,
+        details=body.meta or {},
+    )
+    await db.commit()
+    await db.refresh(entry)
+    return {
+        "logged": True,
+        "entry": {
+            "caregiver_id": current_patient.uuid,
+            "patient_id": body.patient_id or current_patient.uuid,
+            "action": body.action,
+            "meta": body.meta or {},
+            "timestamp": entry.timestamp.isoformat() if entry.timestamp else None,
+        },
     }
 
 
