@@ -38,36 +38,52 @@ class QuadriplegicTriageModel:
         self.num_labels = 4
         self.model = None  # Loaded on demand
 
-        # Medical keyword database for rule-based fallback
+        # Medical keyword database for rule-based fallback.
+        # NOTE: Kiswahili terms are included so code-switched input
+        # ("nina chest pain", "nina homa kali") triages correctly. These SW
+        # medical terms are best-effort and MUST be reviewed by a fluent
+        # clinical speaker before real use (see mobile/src/i18n/NEEDS_SW_REVIEW.md).
         self.critical_keywords = [
             "can't breathe", "breathing difficulty", "chest pain", "heart attack",
             "unconscious", "seizure", "choking", "severe bleeding", "anaphylaxis",
             "autonomic dysreflexia", "ad", "blood pressure spike", " pounding headache",
             "flushed", "sweating above injury", "goosebumps", "nasal congestion",
-            "bradycardia", "slow heart rate", "hypertension", "systolic above 200"
+            "bradycardia", "slow heart rate", "hypertension", "systolic above 200",
+            # --- Kiswahili (NEEDS_SW_REVIEW) ---
+            "siwezi kupumua", "ugumu wa kupumua", "kupumua kwa shida",
+            "maumivu ya kifua", "kifua", "kuzimia", "kifafa", "kutokwa damu nyingi",
+            "maumivu makali ya kichwa", "kichwa na jasho", "shinikizo la damu",
         ]
 
         self.high_keywords = [
             "fever", "infection", "pneumonia", "uti", "urinary tract infection",
             "pressure sore", "wound", "fracture", "spasticity", "severe pain",
-            "nausea", "vomiting", "constipation", "impaction", "dehydration"
+            "nausea", "vomiting", "constipation", "impaction", "dehydration",
+            # --- Kiswahili (NEEDS_SW_REVIEW) ---
+            "homa", "homa kali", "maambukizi", "kidonda", "kidonda cha mgandamizo",
+            "mrija", "catheter", "kibofu", "kutapika", "kichefuchefu", "kuvimbiwa",
         ]
 
         self.medium_keywords = [
             "pain", "discomfort", "spasms", "stiffness", "anxiety", "depression",
-            "sleep problems", "appetite loss", "skin irritation", "bladder issues"
+            "sleep problems", "appetite loss", "skin irritation", "bladder issues",
+            # --- Kiswahili (NEEDS_SW_REVIEW) ---
+            "maumivu", "usumbufu", "mkakamao", "wasiwasi", "kizunguzungu", "uchovu",
         ]
 
         # SCI-specific complications
         self.sci_complications = {
             "autonomic_dysreflexia": {
-                "keywords": ["headache", "high blood pressure", "sweating", "flushed", "stuffy nose"],
+                # SW terms best-effort (NEEDS_SW_REVIEW).
+                "keywords": ["headache", "high blood pressure", "sweating", "flushed", "stuffy nose",
+                             "kichwa", "maumivu ya kichwa", "shinikizo la damu", "jasho", "pua imeziba"],
                 "priority": PriorityLevel.CRITICAL,
                 "action": "immediate_hospital",
                 "urgency": 15  # minutes
             },
             "respiratory_distress": {
-                "keywords": ["shortness of breath", "can't breathe", "cough", "pneumonia", "aspiration"],
+                "keywords": ["shortness of breath", "can't breathe", "cough", "pneumonia", "aspiration",
+                             "kupumua kwa shida", "siwezi kupumua", "kikohozi", "ugumu wa kupumua"],
                 "priority": PriorityLevel.CRITICAL,
                 "action": "immediate_hospital",
                 "urgency": 10

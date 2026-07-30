@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Local databases (backend defaults to SQLite when DATABASE_URL is unset)
+*.db
+*.sqlite
+*.sqlite3
+afyaconnect.db
+
+# Env / secrets
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+
+# Uploads
+uploads/

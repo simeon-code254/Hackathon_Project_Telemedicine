@@ -71,8 +71,14 @@ class Patient(Base):
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
     email = Column(String(255), unique=True, nullable=True)
-    phone_primary = Column(String(20), nullable=False)
+    phone_primary = Column(String(20), nullable=False, index=True)
     phone_emergency = Column(String(20), nullable=True)
+
+    # Authentication
+    password_hash = Column(String(255), nullable=True)  # set on register
+
+    # Language preference (drives app language + TTS locale: "en" | "sw")
+    preferred_language = Column(String(5), default="en")
 
     # Disability Information (Critical for accessibility)
     disability_type = Column(Enum(DisabilityType), default=DisabilityType.QUADRIPLEGIA)
@@ -149,6 +155,47 @@ class Patient(Base):
             "assistive_tech": self.primary_assistive_tech.value,
             "caregiver": self.caregiver_name if self.has_caregiver else None,
             "communication": self.preferred_communication.value
+        }
+
+    # DB AssistiveTech enum values differ from the tokens the mobile app uses
+    # (e.g. "switch_access" here vs "switch" in the app). Map so the app's
+    # i18n keys (access.<token>) resolve.
+    _TECH_TO_APP = {
+        "none": "none",
+        "eye_tracking": "eye_tracking",
+        "head_mouse": "head_mouse",
+        "sip_and_puff": "sip_puff",
+        "switch_access": "switch",
+        "voice_control": "voice",
+        "caregiver_proxy": "caregiver_proxy",
+    }
+
+    def to_api_dict(self):
+        """Serialize to the exact shape the mobile app expects (see
+        mobile/src/services/api.js mockMe()). Keeps USE_MOCK=false a drop-in."""
+        def _enum(v):
+            return v.value if hasattr(v, "value") else v
+        tech = _enum(self.primary_assistive_tech)
+        return {
+            "patient_id": self.uuid,
+            "first_name": self.first_name,
+            "last_name": self.last_name or "",
+            "phone_primary": self.phone_primary,
+            "phone_emergency": self.phone_emergency,
+            "disability_type": _enum(self.disability_type),
+            "primary_assistive_tech": self._TECH_TO_APP.get(tech, tech),
+            "preferred_language": self.preferred_language or "en",
+            "has_caregiver": bool(self.has_caregiver),
+            "caregiver_name": self.caregiver_name,
+            "caregiver_phone": self.caregiver_phone,
+            "caregiver_can_schedule": bool(self.caregiver_can_schedule),
+            "caregiver_can_consent": bool(self.caregiver_can_consent),
+            "conditions": self.chronic_conditions or [],
+            "medications": self.medications or [],
+            "allergies": self.allergies or [],
+            "address_line1": self.address_line1,
+            "city": self.city,
+            "region": self.region,
         }
 
 # ================= DOCTOR MODEL =================
