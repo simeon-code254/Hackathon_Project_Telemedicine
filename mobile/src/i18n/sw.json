@@ -130,7 +130,22 @@
       "medium": "Wastani",
       "low": "Chini"
     },
-    "spokenAction": "Hatua inayopendekezwa: {{action}}."
+    "spokenAction": "Hatua inayopendekezwa: {{action}}.",
+    "action": {
+      "immediate_hospital": "Nenda hospitalini mara moja.",
+      "hospital_or_home_visit": "Unahitaji huduma ya haraka — ziara ya hospitali au muuguzi wa nyumbani.",
+      "home_visit_priority": "Tutapanga kipaumbele ziara ya muuguzi nyumbani kwako.",
+      "teleconsult_or_scheduled_visit": "Panga mashauriano ya video au ziara ya kliniki.",
+      "teleconsult_priority": "Tunapendekeza mashauriano ya video ili kuepuka safari.",
+      "hospital_or_teleconsult": "Unahitaji huduma hivi karibuni — ziara ya hospitali au mashauriano ya video.",
+      "self_care_with_follow_up": "Jitunze nyumbani na ufuatilie kama hali haiboreki."
+    },
+    "bookAppointment": "Panga miadi",
+    "bookAppointmentHint": "Panga ziara hii inayopendekezwa sasa",
+    "booking": "Tunapanga miadi yako",
+    "booked": "Miadi imepangwa. Unaweza kuiona chini ya Miadi.",
+    "bookFailed": "Imeshindikana kupanga miadi. Tafadhali jaribu tena.",
+    "bookNeedsCaregiverPermission": "Mlezi huyu hairuhusiwi kupanga miadi kwa mgonjwa huyu."
   },
   "queue": {
     "title": "Foleni yako",
@@ -164,7 +179,7 @@
     },
     "joinHint": "Fungua simu ya video kwa miadi hii",
     "detailsHint": "Ona maelezo kamili ya miadi hii",
-    "mockNotice": "Data ya onyesho — uwekaji miadi bado haujaunganishwa na seva."
+    "mockNotice": "Data ya onyesho — miadi ya mfano imeonyeshwa hapa. Haijaunganishwa na seva halisi kwa sasa."
   },
   "emergency": {
     "title": "Dharura",
@@ -194,7 +209,7 @@
     "cannotConsent": "Mgonjwa huyu haruhusu walezi kutoa idhini.",
     "canSchedule": "Unaweza kupanga miadi kwa mgonjwa huyu.",
     "actionLogged": "Kitendo kimerekodiwa katika kumbukumbu.",
-    "mockNotice": "Onyesho — vitendo vya mlezi vinarekodiwa hapa; kumbukumbu ya seva bado haijaunganishwa.",
+    "mockNotice": "Onyesho — vitendo vya mlezi vinarekodiwa hapa kwa sasa. Havijaunganishwa na seva halisi.",
     "selectPatient": "Chagua mgonjwa"
   },
   "settings": {

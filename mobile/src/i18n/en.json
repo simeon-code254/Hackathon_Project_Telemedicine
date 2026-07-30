@@ -130,7 +130,22 @@
       "medium": "Medium",
       "low": "Low"
     },
-    "spokenAction": "Recommended action: {{action}}."
+    "spokenAction": "Recommended action: {{action}}.",
+    "action": {
+      "immediate_hospital": "Go to the hospital immediately.",
+      "hospital_or_home_visit": "You need urgent care — a hospital visit or a home visit nurse.",
+      "home_visit_priority": "We'll prioritise a home visit nurse for you.",
+      "teleconsult_or_scheduled_visit": "Book a video consultation or a clinic visit.",
+      "teleconsult_priority": "We recommend a video consultation to avoid travel.",
+      "hospital_or_teleconsult": "You need care soon — a hospital visit or a video consultation.",
+      "self_care_with_follow_up": "Manage this at home and follow up if it doesn't improve."
+    },
+    "bookAppointment": "Book appointment",
+    "bookAppointmentHint": "Schedule this recommended visit now",
+    "booking": "Booking your appointment",
+    "booked": "Appointment booked. You can see it under Appointments.",
+    "bookFailed": "Could not book the appointment. Please try again.",
+    "bookNeedsCaregiverPermission": "This caregiver is not authorized to schedule appointments for this patient."
   },
   "queue": {
     "title": "Your queue",
@@ -164,7 +179,7 @@
     },
     "joinHint": "Open the video call for this appointment",
     "detailsHint": "See the full details of this appointment",
-    "mockNotice": "Demo data — appointment booking is not connected to the server yet."
+    "mockNotice": "Demo data — sample appointments shown here. Not connected to a real server right now."
   },
   "emergency": {
     "title": "Emergency",
@@ -194,7 +209,7 @@
     "cannotConsent": "This patient has not allowed caregivers to give consent.",
     "canSchedule": "You can schedule appointments for this patient.",
     "actionLogged": "Action recorded in the activity log.",
-    "mockNotice": "Demo — caregiver actions are logged locally; the server audit log is not connected yet.",
+    "mockNotice": "Demo — caregiver actions are logged locally right now. Not connected to a real server.",
     "selectPatient": "Select patient"
   },
   "settings": {

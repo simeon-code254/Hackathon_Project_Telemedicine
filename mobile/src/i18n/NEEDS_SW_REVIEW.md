@@ -18,6 +18,13 @@
 | `triage.priority.critical` | Critical | Hatari kubwa | medium | Must read as clinically urgent, not merely "dangerous". |
 | `triage.priority.high` | High | Juu | medium | Confirm this reads as urgency, not literal "up/above". |
 | `triage.priority.medium` | Medium | Wastani | high | |
+| `triage.action.immediate_hospital` | Go to the hospital immediately. | Nenda hospitalini mara moja. | high | Direct, standard. |
+| `triage.action.hospital_or_home_visit` | You need urgent care — a hospital visit or a home visit nurse. | Unahitaji huduma ya haraka — ziara ya hospitali au muuguzi wa nyumbani. | medium | Confirm urgency comes through as strongly as the English. |
+| `triage.action.home_visit_priority` | We'll prioritise a home visit nurse for you. | Tutapanga kipaumbele ziara ya muuguzi nyumbani kwako. | low | "Kipaumbele" (priority) placement may read awkwardly — needs a native speaker's ear. |
+| `triage.action.teleconsult_or_scheduled_visit` | Book a video consultation or a clinic visit. | Panga mashauriano ya video au ziara ya kliniki. | medium | |
+| `triage.action.teleconsult_priority` | We recommend a video consultation to avoid travel. | Tunapendekeza mashauriano ya video ili kuepuka safari. | medium | |
+| `triage.action.hospital_or_teleconsult` | You need care soon — a hospital visit or a video consultation. | Unahitaji huduma hivi karibuni — ziara ya hospitali au mashauriano ya video. | medium | |
+| `triage.action.self_care_with_follow_up` | Manage this at home and follow up if it doesn't improve. | Jitunze nyumbani na ufuatilie kama hali haiboreki. | medium | Make sure this doesn't read as dismissive for a patient who is actually worried. |
 | `triage.priority.low` | Low | Chini | medium | Confirm reads as urgency level. |
 | `symptom.painLevel` | Pain level | Kiwango cha maumivu | high | |
 

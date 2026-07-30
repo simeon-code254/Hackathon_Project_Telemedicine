@@ -59,7 +59,9 @@ async function realRequest(path, { method = 'GET', body, token } = {}) {
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`API ${res.status}: ${detail || res.statusText}`);
+    const err = new Error(`API ${res.status}: ${detail || res.statusText}`);
+    err.status = res.status; // lets callers branch (e.g. 403 = caregiver not permitted)
+    throw err;
   }
   return res.json();
 }
@@ -133,6 +135,7 @@ function mockTriage(symptomsText) {
     };
   }
   return {
+    triage_id: `mock-triage-${Date.now()}`,
     priority: rule.priority,
     confidence: matched.length ? 0.86 : 0.6,
     recommended_action: rule.action,
@@ -339,6 +342,37 @@ export const api = {
     return realRequest('/appointments');
   },
 
+  // Book an appointment off a completed triage. `triage_id` is required by
+  // the real backend (an appointment always follows a triage record).
+  // `acting_as_caregiver: true` routes through the backend's
+  // caregiver_can_schedule permission gate - a 403 there means this
+  // caregiver isn't authorized (err.status === 403; see realRequest above).
+  async createAppointment({ patient_id, triage_id, appointment_type, acting_as_caregiver }) {
+    if (USE_MOCK) {
+      await wait(500);
+      const entry = {
+        id: `A${Date.now()}`,
+        type: appointment_type,
+        provider: _PROVIDER_DEFAULT[appointment_type] || 'Care team',
+        starts_at: new Date(Date.now() + 3600 * 1000).toISOString(),
+        joinable: appointment_type === 'teleconsult',
+      };
+      MOCK_APPOINTMENTS.unshift(entry);
+      return {
+        success: true,
+        appointment_id: entry.id,
+        appointment_type,
+        scheduled_time: entry.starts_at,
+        status: 'scheduled',
+        _mock: true,
+      };
+    }
+    return realRequest('/appointments', {
+      method: 'POST',
+      body: { patient_id, triage_id, appointment_type, acting_as_caregiver: !!acting_as_caregiver },
+    });
+  },
+
   // ---- CAREGIVER AUDIT LOG ----
   // NARROW on purpose: the real backend only accepts the two session-transition
   // actions below (enter/exit caregiver mode). Every other caregiver action
@@ -394,6 +428,14 @@ function mockMe(phone = '+254712345678') {
     region: 'Nairobi',
   };
 }
+
+// Matches backend/main.py's _PROVIDER_DEFAULT so a mock-mode booking's
+// placeholder provider text reads the same as a real one.
+const _PROVIDER_DEFAULT = {
+  teleconsult: 'AfyaConnect teleconsult',
+  hospital: 'Hospital visit',
+  home_visit: 'Home visit nurse',
+};
 
 const MOCK_APPOINTMENTS = [
   {
