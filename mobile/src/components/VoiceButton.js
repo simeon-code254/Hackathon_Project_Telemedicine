@@ -1,7 +1,8 @@
 import React, { useContext, useEffect, useRef, useState } from 'react';
-import { Pressable, Text, Animated, StyleSheet, useReducedMotion } from 'react-native';
+import { Pressable, Text, Animated, StyleSheet } from 'react-native';
 import { AppContext } from '../context/AppContext';
 import { STT_AVAILABLE } from '../hooks/useSpeech';
+import { useReducedMotion } from '../hooks/useReducedMotion';
 
 // Big microphone button for voice input / commands.
 //
@@ -53,7 +54,7 @@ export default function VoiceButton({
   };
 
   return (
-    <Animated.View style={{ transform: [{ scale: reduceMotion ? 1 : pulse }], alignSelf: 'center' }}>
+    <Animated.View style={{ transform: [{ scale: reduceMotion ? 1 : pulse }], alignSelf: 'center', alignItems: 'center' }}>
       <Pressable
         onPress={handlePress}
         accessibilityRole="button"
@@ -72,21 +73,25 @@ export default function VoiceButton({
           borderColor: listening ? theme.priority.high : c.accent,
         }}
       >
+        {/* Icon only inside the circle; the caption sits below so it never
+            clips the button (found while running the app). */}
         <Text
           allowFontScaling
           accessibilityElementsHidden
           importantForAccessibility="no"
-          style={{ fontSize: diameter * 0.34 }}
+          style={{ fontSize: diameter * 0.4 }}
         >
           🎤
         </Text>
-        <Text
-          allowFontScaling
-          style={{ color: c.white, fontSize: theme.font.small, fontWeight: '700', marginTop: 4, textAlign: 'center', paddingHorizontal: 8 }}
-        >
-          {label}
-        </Text>
       </Pressable>
+      <Text
+        allowFontScaling
+        accessibilityElementsHidden
+        importantForAccessibility="no"
+        style={{ color: c.text, fontSize: theme.font.label, fontWeight: '700', marginTop: theme.spacing.sm, textAlign: 'center', maxWidth: diameter * 2.4 }}
+      >
+        {label}
+      </Text>
     </Animated.View>
   );
 }

@@ -149,10 +149,8 @@ export default function SymptomReportScreen({ navigation }) {
         />
       </View>
 
-      {/* Free-text describe */}
-      <Text accessibilityRole="header" allowFontScaling style={{ color: theme.colors.text, fontSize: theme.font.label, fontWeight: '700', marginBottom: theme.spacing.xs }}>
-        {t('symptom.describeHeading')}
-      </Text>
+      {/* Free-text describe. FieldInput renders the label itself, so no separate
+          header here (that produced a duplicate label — found while running). */}
       <FieldInput
         label={t('symptom.describeHeading')}
         value={describe}
