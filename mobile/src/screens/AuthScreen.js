@@ -38,13 +38,19 @@ export default function AuthScreen({ navigation }) {
     setBusy(true);
     announce(mode === 'login' ? t('auth.signingIn') : t('auth.creating'));
     try {
-      if (mode === 'login') await login({ phone, password });
-      else await register({ name, phone, password });
-      // Route based on whether a profile is already chosen.
-      navigation.reset({
-        index: 0,
-        routes: [{ name: assistiveTech ? 'Home' : 'AccessibilitySetup' }],
-      });
+      let dest;
+      if (mode === 'login') {
+        const result = await login({ phone, password });
+        // Returning patient already has a saved profile → straight Home.
+        // Decide from the RESULT, not context state (which updates async and
+        // would still be stale in this synchronous handler).
+        dest = result?.patient?.primary_assistive_tech || assistiveTech ? 'Home' : 'AccessibilitySetup';
+      } else {
+        await register({ name, phone, password });
+        // New account → let them choose their assistive-tech profile first.
+        dest = 'AccessibilitySetup';
+      }
+      navigation.reset({ index: 0, routes: [{ name: dest }] });
     } catch (err) {
       const msg = t('auth.errorFailed');
       setErrors({ form: msg });

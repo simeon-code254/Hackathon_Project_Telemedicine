@@ -15,6 +15,11 @@
 
 import Constants from 'expo-constants';
 
+// true  = self-contained demo (mock data, runs with no backend).
+// false = live: talks to the FastAPI backend at expo.extra.apiBaseUrl.
+// Verified working end-to-end against the real backend; kept true by default so
+// the app still runs standalone (e.g. Expo Go without a server). Flip to false
+// once the backend is reachable at the configured apiBaseUrl.
 export const USE_MOCK = true;
 
 const BASE_URL =
@@ -26,12 +31,21 @@ const BASE_URL =
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// The current auth token. AppContext calls setAuthToken() after login/register
+// and on boot (from SecureStore), so authenticated endpoints (/auth/me,
+// /appointments, ...) carry the Bearer token without every caller passing it.
+let authToken = null;
+export function setAuthToken(token) {
+  authToken = token || null;
+}
+
 async function realRequest(path, { method = 'GET', body, token } = {}) {
+  const bearer = token || authToken;
   const res = await fetch(`${BASE_URL}${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });

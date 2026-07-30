@@ -9,7 +9,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import i18n from '../i18n';
 import { getAccessibilityTheme } from '../theme/accessibility';
-import { api } from '../services/api';
+import { api, setAuthToken } from '../services/api';
 
 export const AppContext = createContext(null);
 
@@ -55,7 +55,10 @@ export function AppProvider({ children }) {
           setLangState(savedLang);
           i18n.changeLanguage(savedLang);
         }
-        if (savedToken) setToken(savedToken);
+        if (savedToken) {
+          setToken(savedToken);
+          setAuthToken(savedToken); // so authed API calls carry it after a restart
+        }
         if (savedProfile) setUser(JSON.parse(savedProfile));
         if (savedTech) setAssistiveTechState(savedTech);
         if (savedPrefs) setPrefs({ ...DEFAULT_PREFS, ...JSON.parse(savedPrefs) });
@@ -90,6 +93,7 @@ export function AppProvider({ children }) {
   // --- Auth ---
   const persistSession = useCallback(async (result) => {
     setToken(result.access_token);
+    setAuthToken(result.access_token); // thread token into the API layer
     setUser(result.patient);
     await SecureStore.setItemAsync(KEYS.token, result.access_token).catch(() => {});
     await AsyncStorage.setItem(KEYS.profile, JSON.stringify(result.patient));
@@ -122,6 +126,7 @@ export function AppProvider({ children }) {
 
   const logout = useCallback(async () => {
     setToken(null);
+    setAuthToken(null);
     setUser(null);
     setCaregiver(null);
     await SecureStore.deleteItemAsync(KEYS.token).catch(() => {});
