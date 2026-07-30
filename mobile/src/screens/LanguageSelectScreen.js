@@ -1,5 +1,5 @@
 import React, { useContext, useEffect } from 'react';
-import { View, Text } from 'react-native';
+import { View, Text, Image } from 'react-native';
 import { useTranslation } from 'react-i18next';
 import { AppContext } from '../context/AppContext';
 import { useSpeech } from '../hooks/useSpeech';
@@ -40,19 +40,17 @@ export default function LanguageSelectScreen({ navigation }) {
   return (
     <SpokenScreen>
       <View style={{ flex: 1, justifyContent: 'center' }}>
-        <Text
-          allowFontScaling
-          accessibilityRole="header"
-          style={{ color: theme.colors.primary, fontSize: theme.font.display, fontWeight: '900', textAlign: 'center' }}
-        >
-          {t('app.name')}
-        </Text>
-        <Text
-          allowFontScaling
-          style={{ color: theme.colors.textMuted, fontSize: theme.font.label, textAlign: 'center', marginBottom: theme.spacing.xl }}
-        >
-          {t('app.tagline')}
-        </Text>
+        {/* Official AfyaConnect brand lockup. accessibilityLabel gives screen
+            readers the equivalent of the baked-in wordmark + tagline text,
+            since a screen reader can't read pixels in an image. */}
+        <Image
+          source={require('../../assets/logo-lockup.png')}
+          accessible
+          accessibilityRole="image"
+          accessibilityLabel={`${t('app.name')}. ${t('app.tagline')}`}
+          resizeMode="contain"
+          style={{ width: '100%', aspectRatio: 1398 / 403, marginBottom: theme.spacing.xl }}
+        />
         <ScreenHeader title={t('language.title')} subtitle={t('language.hint')} />
         <ScanGroup items={items} forceScan speedMs={2200} />
       </View>
